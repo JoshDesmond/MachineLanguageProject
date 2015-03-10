@@ -1,0 +1,602 @@
+*-----------------------------------------------------------
+* Title      : Physics Loop
+* Written by : Josh Desmond
+* Date       : 5/18/14
+* Description: 
+*
+* Reserved Registers:
+* 
+*-----------------------------------------------------------
+
+; The following, "OFFSET" structure, defines a relative location
+; of variables in the BALL data strucutre. There's actually no
+; "object" definition of a BALL, but rather, the first byte of
+; a ball in memory needs to be known, then the relative information
+; of the ball is defined by the following OFFSET.
+
+        OFFSET  0
+length  ds.w    1       ; length of square containing ball
+xPos    ds.w    1       ; xCoordinate of ball in pixels
+yPos    ds.w    1       ; from screen
+xVel    ds.w    1       ; velocity of ball in pixels/tick
+yVel    ds.w    1 
+        ds.w    0       ; ensures word alignment of structure
+B_SIZE  equ     *       ; This will always return the number of bytes/
+        ORG     *       ; or the length in bytes of the ball data structure
+                        ; the * refers to the current location. bsize is
+                        ; needed to make a list of balls.
+                        ; End of Part declaration
+
+        OFFSET  0
+node    ds.b    B_SIZE  ; The node's can only hold BALLS, so this is a
+next    ds.w    1       ; definition of a linked list of BALLS. Next will
+        ds.w    0       ; point to the next node in the list.
+N_SIZE  equ     *       
+        ORG     *
+
+*This linked list is going to be used to store all balls marked for deletion
+*in the flush methods.
+        OFFSET  0
+memLoc  ds.w    1
+memNext ds.w    1
+        ds.w    0
+MEM_SIZE equ    *
+        ORG     *
+
+*---------------------------------------------------------
+* MAIN/START: This initiates anything that needs initiating,
+* then goes straight into the LOOP of the program.
+
+	    ORG	$1000
+START   
+
+        * Setting up the "Mouse Listener"
+        move.l  #mouseDownIRQ,$70       ; IRQ4
+        ;#mouseDownIRQ is an arbitrary name that points to the
+        ;exception script I titled mouseDownIRQ. The $70 is a
+        ;68000 constant:
+        move.b  #60,d0          ; We are about to call trap #60
+        move.w  #$0401,d1       ; TrapTask #60 defining the IRQ
+        trap    #15
+        
+        * Initiate the linked list and create two example balls via
+        *the next ball routine.
+        bsr     initiateList
+        bsr     initiateFlushList        
+        
+        ;bsr     createBall
+        bsr     createWindow    ; this actually only *sets* the window size
+                                ; but sets barrierX and Y too
+        
+LOOP
+        bsr     userLoop    ; user I/O, check for awaiting clicks
+        bsr     logicLoop   ; update balls' positions and velocities
+        bsr     drawLoop    ; update the screen's display
+        bsr     flushCounter    ;counts up for the next flush
+        bsr     pauseLoop   ; pauses for a short amount of time
+        bra     LOOP
+
+
+*-----------------------------------------------------------
+* userLoop: Checks for user input through flag1, and creates
+* a ball depending on the variables set in the IRQ
+userLoop
+    If.b flag1 <eq> #255 THEN
+        ;mouseX and mouseY then must contain the new values
+        
+        * The following code is copied from the variables decleration:
+        ; Variables used for newBall routine
+        ;b_length    ds.w    1
+        ;b_xPos      ds.w    1
+        ;b_yPos      ds.w    1
+        ;b_xVel      ds.w    1
+        ;b_yVel      ds.w    1
+        
+        move.w  mouseX,b_xPos   ;mouseX contains the mouse coords, so
+        move.w  mouseY,b_yPos   ;use these to define a new ball.
+        move.w  #ballXSpeed,b_xVel  ;ballXSpeed is a static constant.
+        move.w  #1,b_yVel
+        
+        bsr     newBall        ;this actually adds the ball to the list
+                               ;and updates all the variables and linked list
+        ; Turn flag1 off again.
+        not.b   flag1
+    ENDI
+    
+    rts
+
+*-----------------------------------------------------------
+* logicLoop
+* updates position based on velocity, and applies gravity,
+* and resets ball if out of bounds
+logicLoop
+
+    move.w  b_first,a6
+
+    * DO {logic} WHILE {There are still balls to logic()}
+logicLoop_Do
+    * Applies gravity
+    move.w  yVel(a6),d1
+    addq    #gravity,d1
+    move.w  d1,yVel(a6)
+    
+    ;moves based on velocity in the Y (D1 still contains yVel + grav)
+    add.w   d1,yPos(a6)
+    
+    * Applies friction
+    IF.w yPos(a6) <GT> #frictionY THEN
+        cmp     #0,xVel(a6)     ;we're seeing if it's going left, right, or not moving
+        
+        beq     logicLoop_Do_Esc
+        blt     logicLoop_Do_Right
+        bgt     logicLoop_Do_Left
+        
+logicLoop_Do_Right
+        addq    #friction,xVel(a6)
+        bra     logicLoop_Do_Esc
+logicLoop_Do_Left
+        subq    #friction,xVel(a6)
+        ;bra     logicLoop_Do_Esc
+logicLoop_Do_Esc
+    ENDI
+    
+    ;move based on velocity in the X
+    move.w  xVel(a6),d1
+    add.w   d1,xPos(a6)
+    
+    ;reverses direction if out of bounds in the X
+    IF.w xPos(a6) <HI> #barrierX THEN
+        neg.w   xVel(a6)
+    ENDI
+    
+    ;reverses direction if out of bounds in the Y and sets position
+    ;also undoes the addition of gravity because we don't want negative
+    ;gravity being applied every bounce.
+    IF.w yPos(a6) <HI> #barrierY THEN
+        move.w  yVel(a6),d1
+        negx.w   d1                  ;flip direction
+        addq    #friction,d1        ;lose a flat amount of velocity to collision friction
+        move.w  d1,yVel(a6)
+        move.w  #barrierY,yPos(a6)  ;Move the ball to the barrier.
+    ENDI
+    
+    ;we do not need worry about y being too low (above the roof) because 
+    ;it will never happen. 
+    
+    
+logicLoop_While
+    move.w  next(a6),a6     ;goto the next item in the list/set a6 to the next location
+    ;if a6 == last
+    cmpa.w  b_last,a6
+    bne     logicLoop_Do
+    beq     logicLoop_Esc
+logicLoop_Esc
+
+    rts
+    
+
+
+*-----------------------------------------------------------
+* drawLoop
+* 
+drawLoop
+    movem.l d0-d4,-(SP) ;save registers
+    
+    ;first, clear screen with TT11, defined as,
+    ;"Clear Screen : Set D1.W to $FF00."
+    move.w  #$FF00,d1
+    move.b  #11,d0
+    trap    #15
+    
+    ;tt 80 is pen color where color = $00BBGGRR
+    ;tt 81 is fill color
+    move.l  #$000000FF,d1   ;red
+    move.b  #80,d0
+    trap    #15
+    move.b  #81,d0
+    trap    #15
+    
+    
+    move.w  b_first,a6    ;set a6 for the do while loop
+
+    * DO {draw the ball} WHILE {There are still balls to draw()}
+drawLoop_Do
+
+    ;TT#88: Draw ellipse bounded by the rectangle (Left X, Upper Y, Right X, Lower Y) 
+    ;where LX = D1.W, UY = D2.W, RX = D3.W, LY = D4.W 
+    ;The ellipse is drawn using pen color and filled using fill color. 
+    ;A circle is drawn if the bounding rectangle is a square.
+    
+    move.w  xPos(a6),d1
+    move.w  yPos(a6),d2
+    
+    ;calculate RX and LY via "length"
+    move.w  xPos(a6),d3
+    add.w   length(a6),d3
+    move.w  yPos(a6),d4
+    add.w   length(a6),d4
+    
+    move.b  #88,d0  ;draw the ball
+    trap    #15
+    
+    
+    
+drawLoop_While
+    ;while there are still balls to draw
+    move.w  next(a6),a6     ;goto the next item in the list/set a6 to the next location
+    ;if a6 == last
+    cmpa.w  b_last,a6
+    bne     drawLoop_Do
+    beq     drawLoop_Esc
+    
+drawLoop_Esc
+
+    move.b  #94,D0  ;this is a doublebuffering command, it says the frame is done being
+    trap    #15     ;being buffered and thus can replace the old one, and now any drawing
+                    ;will happen on the next frame.
+
+    movem.l (SP)+,d0-d4    ;return registers from Stack
+    rts
+    
+*-----------------------------------------------------------
+* pauseLoop
+* This causes the CPU to wait a little bit
+
+pauseLoop
+    movem.l d0-d1,-(SP)     save d0/d1 on the stack
+    move.b  #23,d0          ;trap task #23 delay d1.l/100 seconds
+    move.l  #$00000002,d1    ;add delay
+    trap    #15
+    movem.l (SP)+,d0-d1
+    rts
+
+
+*-----------------------------------------------------------
+* initiateList:
+* Defines first, curr, last, and places an example ball into
+* the list
+initiateList
+        * Set up variables
+        move.w      #l_first_static,a6
+        move.w      a6,b_first    ;l_first_static is a constant = $2000
+        move.w      a6,b_last     ;last is the null node location after
+                                ;the last actual value
+        
+       
+        * creates an example Node/Ball
+        move.w      #ballLength,(b_length)  ;#ballLength is a constant
+        move.w      #40,(b_xPos)    ;Each of these commands is saying,
+        move.w      #40,(b_yPos)    ;"move the # into the location
+        move.w      #35,(b_xVel)    ;addressed by b_xPos, which we defined
+        move.w      #0,(b_yVel)     ;as a spot in memory in the variables
+        bsr         newBall         ;section of the code.
+        
+        ; create another ball
+        move.w      #350,(b_xPos)
+        move.w      #200,(b_yPos)
+        move.w      #-20,(b_xVel)
+        move.w      #-4,(b_yVel)
+        bsr         newBall
+        
+        rts
+*-----------------------------------------------------------
+* initiateFlushList works just like the above does, it sets
+* up first, and last really...
+initiateFlushList
+        move.w      #f_first_static,a5  ;this is a constant, $3000
+        move.w      a5,(f_first)        ;both first and last = $3000
+        move.w      a5,(f_last)
+        
+        rts
+        
+
+*-----------------------------------------------------------
+* newBall where n_{var} is set to the proper values for the
+* ball being created in the next space in the linked list.
+newBall
+        movea.w     b_last,a6     ;a6 is being used as our curr
+        
+        move.w      (b_length),length(a6)
+        move.w      (b_xPos),xPos(a6)
+        move.w      (b_yPos),yPos(a6)
+        move.w      (b_xVel),xVel(a6)
+        move.w      (b_yVel),yVel(a6)
+        
+        * Defines next ball by adding a6 with N_SIZE
+        move.w      a6,d0           ;d0 is just a temp variable
+        add.w       #N_SIZE,d0      ;N_SIZE + a6 = location of next node
+        move.w      d0,next(a6)     ;so we should move it into the next position
+        
+        ;increment last and a6 now
+        adda.w      #N_SIZE,a6      ;update a6 to equal "next"
+        move.w      a6,b_last         ;update "last" to equal the next addition or null space
+        
+        RTS
+        
+        
+*-----------------------------------------------------------
+* mouseDownIRQ
+* 
+mouseDownIRQ
+    movem.l d0-d4,-(SP)     ;save registers on stack
+    
+    move.b  #61,D0
+    move.b  #0,D1   ; This is part of TT #61, D1 will read a certain
+                    ; Mouse state, and in this case, it is reading the
+                    ; current mouse state. (It could be #2 for mouse
+                    ; down state, or #1 for the last time the mouse
+                    ; was in the up state).
+    trap    #15
+    ; After running TT #61, we have read and stored the mouse state in
+    ; D0 and D1. According to the documentation, this is how TT #61 stores
+    ; the data: "Post: The mouse data is contained in the following registers:
+    ;    D0 as bits = Ctrl, Alt, Shift, Double, Middle, Right, Left
+    ;       Left is Bit0, Right is Bit 1 etc. 1 = true, 0 = false
+    ;       Shift, Alt, Ctrl represent the state of the corresponding keys.
+    ;    D1.L = 16 bits Y, 16 bits X in pixel coordinates. (0,0 is top left)
+    
+    bsr mouseParse  ;this will read the data now stored in d1 and d2
+    
+    not.b   flag1   ;turn on the mouse flag (to be read during userIO)
+    
+    movem.l (SP)+,d0-d4
+    rte 
+
+mouseParse
+    move.l  d1,d2               ; Copies D1.L into D2 (the Y Register)
+    and.l   #$0000FFFF,d1       ; remove Y from D1 (We only want the low bytes)
+    move.w  d1,mouseX
+    
+    swap    D2                  ;bitwise swapping of the first word and second word of D5
+    and.l   #$0000FFFF,D2       ;now that the x and y has been swapped, and out the X to save just the y
+    move.w  d2,mouseY
+    rts 
+    
+*-----------------------------------------------------------
+* createWindow
+* this sets the window to 800*600 via TT#33
+* and sets barrierX and barrierY based on ballLength
+createWindow
+    MOVE.B  #33,D0
+    MOVE.L  #windX*$10000+windY,D1   Set screen to #windX,#windY
+    TRAP    #15
+    
+createDoubleBuffer
+    MOVE.B  #92,D0      92 changes drawing mode according to D1
+    MOVE.B  #17,D1      17 turns on Doublebuffering
+    TRAP    #15
+    
+    rts
+
+*-----------------------------------------------------------
+* flushCounter
+* adds one to the counter (d7 universal counter), if == #,
+* then flush the dead balls. 
+flushCounter
+    addq.b  #1,flushCount
+    cmp.b   #flushNum,flushCount
+    beq     flushEm
+    rts     ;return back to main loop if else
+    
+flushEm
+    *iterate through the list and if the ball ain't moving "delete" it
+    move.w  #0,flushCount
+    move.w  b_first,a6
+    move.w  next(a6),a6     ;we don't want to delete the first ball, it causes problems with this algorithm
+    
+flushEm_Do
+    move.b  #0,d6   ;d6 will be used a temp flag for the if's to check for deletion
+    
+    *If it stops moving in the Y and the X, then mark for deletion
+    IF.w xVel(a6) <EQ> #0 THEN
+        addq.b  #1,d6   ;add one to d1, this is the first check
+    ENDI
+    
+    IF.w yVel(a6) <GT> #$FFFD THEN
+        addq.b  #1,d6   ;the second check
+    ENDI
+    
+    ;IF.w yPOS(a6) <eq> #barrierY THEN
+    ;    addq.b  #1,d6    ;the other second check (the ball "bounces" because 
+    ;                     ;it adds gravity and stuff, idk quite why)
+    ;ENDI
+    
+    ;IF.w a6 <EQ> b_first THEN
+    ;    move.b  #0,d6   ;We don't want to delete the first ball in the list of
+    ;                    ;balls, because other wise we can't get into the list.
+    ;ENDI
+    
+    IF.b d6 <eq> #2 THEN
+        ;if both checks passed, then lets DELETE
+        bsr     flushEm_markThis    ;marks the current value for deletion
+    ENDI
+    
+flushEm_While
+    ;while there are still balls to flush
+    cmpa.w  b_last,a6
+    beq     flushEm_Esc     ;If a6 == last value, we're done here.
+    
+    move.w  next(a6),a6     ;goto the next item in the list/set a6 to the next location
+    bra     flushEm_Do      ;since the If didn't pass, lets go again with our new a6
+    
+    
+flushEm_Esc
+    
+    * TODO: Go ahead and delete everything that's been marked for deletion
+    bsr     flushEm_flushList
+    
+    rts     ;we used beq to get here, so rts will still take
+            ;us back to the main loop.
+    
+flushEm_markThis
+* Marks the ball at a6 for deletion/adds a6 to a node in our list of dead balls.
+
+
+    ; THE FOLLOWING IS A DEFINITION OF THE LINKED LIST WE WILL BE USING
+;memLoc  ds.w    1
+;memNext ds.w    1
+;        ds.w    0
+;MEM_SIZE equ    *
+;
+;f_first (is a word) = first node location
+;f_last = last (null) node location
+    
+    move.w  f_last,a5  ;we'll be using a5 as our CURR pointer in the flush list
+    
+    * Moves a6 into memLoc(a5)/the list because a6 is a dead ball.
+    move.w  a6,memLoc(a5)
+    
+    * Set the memory location of the next node in this list and increments last as well
+    move.w      a5,d6           ;d6 is just a temp variable
+    add.w       #MEM_SIZE,d6    ;MEM_SIZE + a6 = location of next node
+    move.w      d6,memNext(a5)     ;so we should move it into the next position
+    
+    ;increment last and a6 now
+    adda.w      #MEM_SIZE,a5      ;update a5 to equal "next"
+    ;adda.w      #MEM_SIZE,a5      
+    move.w      a5,f_last         ;update our last pointer.
+    
+    rts
+    
+flushEm_flushList
+    * Deletes everything marked for deletion in the list defined through markThis
+    move.w      f_first,a5      ;make a5 point to the first node in the flush list
+    move.w      b_first,a6      ;make a6 point to the first ball node
+    
+    move.b      #0,flag2_flush    ;ensure our flag is turned off to start.
+    
+    ;cmp.w       #$FFFFFFFF,(a6)      ;If b_first is a null spot in memory, we have nothing
+    ;beq         flushEm_flushList_Esc   ;to remove, so we can just move on here.
+    cmp.w       #$FFFFFFFF,(a5)
+    beq         flushEm_flushList_Esc   ;Same story
+    
+flushEm_flushList_Do
+    * Deletes the ball that A5 is currently pointing to.
+    * TODO: Optimize this.
+    
+    move.w  a6,a4       ;a4 is a temp placeholder for "curr"
+    move.w  next(a6),a6 ;because we're moving a6 to the next to get its next, so we need curr
+    
+    cmp.w   b_last,a6   ;if this is the last ball, we don't want to delete it because that wouldn't work
+                        ;with this algorithm for deletion.
+    beq     flushEm_flushList_Esc
+    
+    IF.w a6 <EQ> memLoc(a5) THEN
+        * We have a match- This deletes (a6) or the next node in the balls list
+        
+        move.w  next(a6),a6     ;we're moving again to get the node we actually want
+
+        move.w  a6,next(a4)     ;replace the next to skip over the node we're deleting
+        
+        move.w  a4,a6
+        move.w  next(a6),a6     ;restore a6 back to the next link in our chain of balls
+        
+        move.b  #255,flag2_flush
+    ENDI
+    cmp.b       #255,flag2_flush
+    beq         flushEm_flushList_While
+    ;bne         flushEm_flushList_Do_Next
+    
+flushEm_flushList_Do_Next
+    ;cmp.w       #$FFFFFFFF,next(a6)     ;check to make sure we don't treat a null spot as a ball
+    ;beq         flushEm_flushList_Esc
+    
+    bra         flushEm_flushList_Do
+    
+flushEm_flushList_While
+    move.b      #0,flag2_flush     ;undo the flag we use to mark a deletion of a5
+
+    * Increments a5 to point to the next node in our flush list.
+    move.w      memNext(a5),a5  ;a5 was deleted if we got here, so lets delete the next a5
+    move.w      b_first,a6      ;move a6 back to the beginning of the list so we can iterate through it again.
+    
+    cmp.w       f_last,a5       ;unless of course there are no more values in a5...
+    bne         flushEm_flushList_Do
+    ;beq         flushEm_flushList_Esc
+    
+flushEm_flushList_Esc
+    * TODO: since all the balls that were marked for deletion have been flushed, this
+    * needs to reinitiate the flushList.
+    ; This will set flushList to start at the end of where it ended before. Essentially it
+    ; will just keep going down in memory, and the old stuff won't matter.
+    
+    * Sets f_first and f_last to the next null point in memory.
+    
+    * TODO: REMOVE TEST
+    move.w      f_last,f_first
+    ;move.w      f_last,d6
+    ;This is a test to see if f_last is causing the error
+    
+    
+    rts
+
+*-----------------------------------------------------------
+* Variable storage and strings
+* ds (define storage) is used to reserve memory for variables
+* dc (define constant) is used to place data in memory
+
+flushNum equ 200
+flushCount  ds.b    1
+            ds.w    0
+
+*-------------------------
+* Window contants. 
+* barrierX requires ballLength 
+* to be constant.
+
+windX   equ 800
+windY   equ 600
+barrierX    equ    730
+barrierY    equ    530
+frictionY   equ    528
+
+* ball/logic constants
+ballLength  equ 50
+ballXSpeed  equ 25
+gravity     equ 3
+friction    equ 1
+
+
+* "Flag" that's flipped when a mouse click needs to be handled
+flag1       ds.b    1
+            ds.w    0       ;this 0 causes word allignment in the memory
+;other flag
+flag2_Flush ds.b    1       
+            ds.w    0
+
+* Coordinates of the last mouse click, used when click is handled in IO loop
+mouseX
+    ds.w    1
+mouseY
+    ds.w    1
+
+
+* Variables used for linked list
+b_first   ds.w    1
+* TODO: Delete this, do we need curr, or just use A?
+;curr    ds.w    1   
+b_last    ds.w    1
+;And the flush list
+f_first ds.w    1
+f_last  ds.w    1
+
+* Variables used for newBall routine
+b_length    ds.w    1
+b_xPos      ds.w    1
+b_yPos      ds.w    1
+b_xVel      ds.w    1
+b_yVel      ds.w    1
+
+* starting point in memory of the linked list
+l_first_static     equ     $3000
+f_first_static     equ     $2000
+
+
+    END    START
+
+
+
+*~Font name~Courier New~
+*~Font size~10~
+*~Tab type~1~
+*~Tab size~4~
