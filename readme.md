@@ -1,4 +1,4 @@
-#Machine Language
+#Machine Language Written for the EASy68k
 
 This is a school project I made which was coded using the assembly language of the M68000 CPU. Written via the EASy68K software available at http://www.easy68k.com/
 
